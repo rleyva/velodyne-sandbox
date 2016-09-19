@@ -8,6 +8,8 @@ find_package(catkin REQUIRED COMPONENTS
   roscpp
   rospy
   std_msgs
+  tf
+  pcl_ros
 )
 
 #find_package(Boost REQUIRED COMPONENTS 
@@ -47,3 +49,11 @@ target_link_libraries(ransac_sphere_node
    ${catkin_LIBRARIES}
 )
 
+# Clumped Cloud
+add_executable(ogrid_tf src/ogrid_tf.cpp)
+
+target_link_libraries(ogrid_tf
+   ${PCL_LIBRARIES}
+   ${Boost_LIBRARIES}
+   ${catkin_LIBRARIES}
+)

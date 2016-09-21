@@ -10,6 +10,7 @@ find_package(catkin REQUIRED COMPONENTS
   std_msgs
   tf
   pcl_ros
+  visualization_msgs
 )
 
 #find_package(Boost REQUIRED COMPONENTS 
@@ -56,4 +57,11 @@ target_link_libraries(ogrid_tf
    ${PCL_LIBRARIES}
    ${Boost_LIBRARIES}
    ${catkin_LIBRARIES}
+)
+
+# RViz Markers
+add_executable(buoy_markers src/markers.cpp)
+
+target_link_libraries(buoy_markers
+  ${catkin_LIBRARIES}
 )

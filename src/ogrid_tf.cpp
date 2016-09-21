@@ -8,6 +8,7 @@
 #include <pcl/point_types.h>
 #include <pcl_conversions/pcl_conversions.h>
 
+#include <pcl/common/transforms.h>
 #include <pcl/filters/extract_indices.h>
 #include <pcl/filters/passthrough.h>
 #include <pcl/filters/statistical_outlier_removal.h>
@@ -29,11 +30,14 @@
 
 /* Boost */
 #include <boost/circular_buffer.hpp>
+#include <boost/timer/timer.hpp>
 
 ros::Publisher pub;
 // clang-format off
 boost::circular_buffer<pcl::PointCloud<pcl::PointXYZ> > tpc_buff(10);
 // clang-format on
+
+// void transform_pc(const pcl::PCLPointCloud::ConstPtr &input, pcl::PCLPointCloud &output) { ROS_INFO("Transforming..."); }
 
 void cloud_merging_cb(const sensor_msgs::PointCloud2ConstPtr &input) {
     /* TF-Shenanigans */
@@ -51,15 +55,63 @@ void cloud_merging_cb(const sensor_msgs::PointCloud2ConstPtr &input) {
     pcl::fromPCLPointCloud2(*input_pc, *working_cloud);
 
     ROS_INFO("Attempting to transform pointcloud");
-    (*working_cloud).header.frame_id = "/velodyne";
-    (*working_cloud).header.stamp = (*input).header.stamp.toSec();
+    //(*working_cloud).header.frame_id = "/velodyne";
+    //(*working_cloud).header.stamp = (*input).header.stamp.toSec();
 
-    if (tf_listener.waitForTransform("enu", "velodyne", (*input).header.stamp, ros::Duration(5.0))) {
-	ROS_INFO("TF Available");
+    if (tf_listener.canTransform("enu", "velodyne", (*input).header.stamp)) {
+	ROS_INFO("Tranform velodyne->enu is VALID");
+    } else {
+	ROS_INFO("Tranform velodyne->enu is NOT valid");
     }
-    tf_listener.lookupTransform("enu", "velodyne", (*input).header.stamp, transform_);
-    // pcl_ros::transformPointCloud("enu", *working_cloud, *transformed_cloud, tf_listener);
-    // tf_listener.lookupTransform("velodyne", "ins", ros::Time(0), transform_);
+
+    if (tf_listener.waitForTransform("enu", "velodyne", (*input).header.stamp, ros::Duration(0.5))) {
+	ROS_INFO("TF Available");
+    } else {
+	ROS_INFO("TF not available");
+    }
+
+    /* TODO: Sort this out; tf should correspond to message stamp */
+    tf_listener.lookupTransform("enu", "velodyne", ros::Time(0), transform_);
+
+    double yaw, pitch, roll;
+    transform_.getBasis().getRPY(roll, pitch, yaw);
+
+    tf::Vector3 v = transform_.getOrigin();
+    tf::Quaternion q = transform_.getRotation();
+
+    Eigen::Matrix3d r_;
+    Eigen::Matrix4d rotation_mat;
+
+    Eigen::Quaterniond orientation(q.getW(), q.getX(), q.getY(), q.getZ());
+    Eigen::Vector3d translation(v.getX(), v.getY(), v.getZ());
+    r_ = orientation.toRotationMatrix();
+
+    /*
+    std::cout << "- Translation: [" << v.getX() << ", " << v.getY() << ", " << v.getZ() << "]" << std::endl;
+    std::cout << "- Rotation: in Quaternion [" << q.getX() << ", " << q.getY() << ", " << q.getZ() << ", " << q.getW() << "]"
+	      << std::endl
+	      << "            in RPY (radian) [" << roll << ", " << pitch << ", " << yaw << "]" << std::endl
+	      << "            in RPY (degree) [" << roll * 180.0 / M_PI << ", " << pitch * 180.0 / M_PI << ", "
+	      << yaw * 180.0 / M_PI << "]" << std::endl;
+    */
+
+    // clang-format off
+    rotation_mat << r_(0,0), r_(0,1), r_(0,2), translation(0),
+		    r_(1,0), r_(1,1), r_(1,2), translation(1),
+		    r_(2,0), r_(2,1), r_(2,2), translation(2),
+		    0,       0,       0,       1;
+    // clang-format on
+
+    std::cout << "\nRotation Matrix: " << std::endl << rotation_mat << std::endl << std::endl;
+
+    pcl::transformPointCloud(*working_cloud, *transformed_cloud, rotation_mat);
+    // pcl::transformPointCloud(*working_cloud, *transformed_cloud, translation, orientation);
+
+    sensor_msgs::PointCloud2 output;
+    pcl::toROSMsg(*transformed_cloud, output);
+    output.header.stamp = ros::Time::now();
+    output.header.frame_id = "enu";
+    pub.publish(output);
 }
 
 int main(int argc, char **argv) {

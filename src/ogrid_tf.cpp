@@ -18,7 +18,7 @@
 #include <pcl/segmentation/sac_segmentation.h>
 
 #include <pcl/features/normal_3d.h>
-#include <pcl/features/voxel_grid.h>
+//#include <pcl/features/voxel_grid.h>
 
 #include <pcl/registration/icp.h>
 #include <pcl/registration/icp_nl.h>
@@ -39,22 +39,28 @@
 #include <boost/circular_buffer.hpp>
 #include <boost/timer/timer.hpp>
 
+bool publish = false;
 int pc_count = 0;
 ros::Publisher pub;
-pcl::PointCloud<pcl::PointXYZ> ccloud; /* Concatenated cloud */
+
+pcl::PointCloud<pcl::PointXYZ> acloud;
+pcl::PointCloud<pcl::PointXYZ> fccloud; /* Concatenated cloud */
+pcl::PointCloud<pcl::PointXYZ>::Ptr tccloud(new pcl::PointCloud<pcl::PointXYZ>);
+pcl::PointCloud<pcl::PointXYZ>::Ptr tcprev(new pcl::PointCloud<pcl::PointXYZ>);
 
 // clang-format off
-boost::circular_buffer<pcl::PointCloud<pcl::PointXYZ> > tpc_buff(10);
+// boost::shared_ptr<pcl::PointCloud<pcl::PointXYZ> >(ccloud);
 // clang-format on
 
-void align_pair(const PointCloud::Ptr cloud_src, const PointCloud::Ptr cloud_tgt, PointCloud::Ptr output,
-		Eigen::Matrix4f &final_transform, bool downsample = false) {
-    /* TODO: Add downsampling */
+/*pcl::PointCloud<pcl::PointXYZ> align_pair(const pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_src,
+					  const pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_tgt, bool downsample = false) {
+     TODO: Add downsampling
 
-    /* Isn't this just a pcl::PointNormal type? */
-    pcl::PointCloudWithNormals::Ptr points_with_normals_src(new pcl::PointCloudWithNormals);
-    pcl::PointCloudWithNormals::Ptr points_with_normals_tgt(new pcl::PointCloudWithNormals);
+     Isn't this just a pcl::PointNormal type?
+    // pcl::PointCloudWithNormals::Ptr points_with_normals_src(new pcl::PointCloudWithNormals);
+    // pcl::PointCloudWithNormals::Ptr points_with_normals_tgt(new pcl::PointCloudWithNormals);
 
+    std::cout << "Starting to align via IPC" << std::endl;
     pcl::PointCloud<pcl::PointXYZ>::Ptr src(new pcl::PointCloud<pcl::PointXYZ>);
     pcl::PointCloud<pcl::PointXYZ>::Ptr tgt(new pcl::PointCloud<pcl::PointXYZ>);
 
@@ -64,7 +70,8 @@ void align_pair(const PointCloud::Ptr cloud_src, const PointCloud::Ptr cloud_tgt
     norm_est.setSearchMethod(tree);
     norm_est.setKSearch(30);
 
-    /* Make thread groud to handle multiple normal calculations */
+    /* Make thread groud to handle multiple normal calculations
+
     norm_est.setInputCloud(src);
     norm_est.compute(*points_with_normals_src);
     pcl::copyPointCloud(*src, *points_with_normals_src);
@@ -74,7 +81,26 @@ void align_pair(const PointCloud::Ptr cloud_src, const PointCloud::Ptr cloud_tgt
     pcl::copyPointCloud(*tgt, *points_with_normals_tgt);
 
     float alpha[4] = {1.0, 1.0, 1.0, 1.0};
-}
+
+    pcl::copyPointCloud(*cloud_src, );
+    pcl::copyPointCloud(*cloud_tgt, tgt);
+
+    pcl::IterativeClosestPointNonLinear<pcl::PointXYZ, pcl::PointXYZ> reg;
+    reg.setTransformationEpsilon(1e-3);
+    reg.setMaxCorrespondenceDistance(1.0);
+    reg.setMaximumIterations(50);
+    reg.setInputTarget(cloud_tgt);
+    reg.setInputSource(cloud_src);
+
+    pcl::PointCloud<pcl::PointXYZ>::Ptr aligned(new pcl::PointCloud<pcl::PointXYZ>);
+
+    reg.align(*aligned);
+    std::cout << "has converged: " << reg.hasConverged() << " score: " << reg.getFitnessScore() << std::endl;
+    std::cout << std::endl << reg.getFinalTransformation() << std::endl;
+
+    /* Transform back into target frame
+    pcl::return *aligned;
+}*/
 
 void cloud_merging_cb(const sensor_msgs::PointCloud2ConstPtr &input) {
     /* TF-Shenanigans */
@@ -139,31 +165,52 @@ void cloud_merging_cb(const sensor_msgs::PointCloud2ConstPtr &input) {
 		    0,       0,       0,       1;
     // clang-format on
 
-    std::cout << "\nRotation Matrix: " << std::endl << rotation_mat << std::endl << std::endl;
+    std::cout << "\n VELODYNE->ENU Rotation Matrix: " << std::endl << rotation_mat << std::endl << std::endl;
 
+    /* Transform to ENU frame as a nice warm up for ICP */
     pcl::transformPointCloud(*working_cloud, *transformed_cloud, rotation_mat);
-    pc_count++;
-    ccloud += *transformed_cloud;
 
-    if (pc_count > 10) {
-	/* Once we have run the callback 10 times, this will be the default option */
+    /* Point cloud alignment */
+    pcl::PointCloud<pcl::PointXYZ> icp_cloud;
+    pcl::IterativeClosestPoint<pcl::PointXYZ, pcl::PointXYZ> reg;
+    reg.setTransformationEpsilon(1e-5);
+    reg.setMaxCorrespondenceDistance(0.05);
+    reg.setMaximumIterations(100);
+
+    /* Working with initial conditions */
+    if (pc_count == 0) {
+	/* Initial cloud, append to end of buffer and continue */
+	ROS_INFO("Waiting on second point cloud");
+	tcprev = transformed_cloud;
+    } else {
+	pcl::PointCloud<pcl::PointXYZ>::Ptr tcloud(new pcl::PointCloud<pcl::PointXYZ>);
+	ROS_INFO("Received cloud, attempting ICP");
+	publish = true;
+
+	reg.setInputTarget(tcprev);
+	reg.setInputSource(transformed_cloud);
+
+	/* TODO: Add exception catch for non-convergence */
+	reg.align(*tcloud);
+	std::cout << "ICP has converged: " << reg.hasConverged() << " score: " << reg.getFitnessScore() << std::endl;
+	std::cout << std::endl << reg.getFinalTransformation() << std::endl;
+
+	/* Transform ICP'ed cloud into ENU frame */
+	// pcl::transformPointCloud(*transformed_cloud, *tcloud, reg.getFinalTransformation());
+	tcprev = tcloud;
+	fccloud = fccloud + *tcprev;
+    }
+
+    if (publish) {
 	sensor_msgs::PointCloud2 output;
-	pcl::toROSMsg(ccloud, output);
+	pcl::toROSMsg(fccloud, output);
+	// pcl::toROSMsg(icp_cloud, output);
+
 	output.header.stamp = ros::Time::now();
 	output.header.frame_id = "enu";
 	pub.publish(output);
-
-    } else {
-	ROS_INFO("Currently collecting point clouds");
     }
-
-    /*
-    sensor_msgs::PointCloud2 output;
-    pcl::toROSMsg(*transformed_cloud, output);
-    output.header.stamp = ros::Time::now();
-    output.header.frame_id = "enu";
-    pub.publish(output);
-    */
+    pc_count++;
 }
 
 int main(int argc, char **argv) {

@@ -17,6 +17,13 @@
 #include <pcl/sample_consensus/sac_model_sphere.h>
 #include <pcl/segmentation/sac_segmentation.h>
 
+#include <pcl/features/normal_3d.h>
+#include <pcl/features/voxel_grid.h>
+
+#include <pcl/registration/icp.h>
+#include <pcl/registration/icp_nl.h>
+#include <pcl/registration/transforms.h>
+
 /* ROS Libs */
 #include <pcl_ros/point_cloud.h>
 #include <pcl_ros/transforms.h>
@@ -32,12 +39,42 @@
 #include <boost/circular_buffer.hpp>
 #include <boost/timer/timer.hpp>
 
+int pc_count = 0;
 ros::Publisher pub;
+pcl::PointCloud<pcl::PointXYZ> ccloud; /* Concatenated cloud */
+
 // clang-format off
 boost::circular_buffer<pcl::PointCloud<pcl::PointXYZ> > tpc_buff(10);
 // clang-format on
 
-// void transform_pc(const pcl::PCLPointCloud::ConstPtr &input, pcl::PCLPointCloud &output) { ROS_INFO("Transforming..."); }
+void align_pair(const PointCloud::Ptr cloud_src, const PointCloud::Ptr cloud_tgt, PointCloud::Ptr output,
+		Eigen::Matrix4f &final_transform, bool downsample = false) {
+    /* TODO: Add downsampling */
+
+    /* Isn't this just a pcl::PointNormal type? */
+    pcl::PointCloudWithNormals::Ptr points_with_normals_src(new pcl::PointCloudWithNormals);
+    pcl::PointCloudWithNormals::Ptr points_with_normals_tgt(new pcl::PointCloudWithNormals);
+
+    pcl::PointCloud<pcl::PointXYZ>::Ptr src(new pcl::PointCloud<pcl::PointXYZ>);
+    pcl::PointCloud<pcl::PointXYZ>::Ptr tgt(new pcl::PointCloud<pcl::PointXYZ>);
+
+    pcl::NormalEstimation<pcl::PointXYZ, pcl::PointNormal> norm_est;
+    pcl::search::KdTree<pcl::PointXYZ>::Ptr tree(new pcl::search::KdTree<pcl::PointXYZ>());
+
+    norm_est.setSearchMethod(tree);
+    norm_est.setKSearch(30);
+
+    /* Make thread groud to handle multiple normal calculations */
+    norm_est.setInputCloud(src);
+    norm_est.compute(*points_with_normals_src);
+    pcl::copyPointCloud(*src, *points_with_normals_src);
+
+    norm_est.setInputCloud(tgt);
+    norm_est.compute(*points_with_normals_tgt);
+    pcl::copyPointCloud(*tgt, *points_with_normals_tgt);
+
+    float alpha[4] = {1.0, 1.0, 1.0, 1.0};
+}
 
 void cloud_merging_cb(const sensor_msgs::PointCloud2ConstPtr &input) {
     /* TF-Shenanigans */
@@ -105,13 +142,28 @@ void cloud_merging_cb(const sensor_msgs::PointCloud2ConstPtr &input) {
     std::cout << "\nRotation Matrix: " << std::endl << rotation_mat << std::endl << std::endl;
 
     pcl::transformPointCloud(*working_cloud, *transformed_cloud, rotation_mat);
-    // pcl::transformPointCloud(*working_cloud, *transformed_cloud, translation, orientation);
+    pc_count++;
+    ccloud += *transformed_cloud;
 
+    if (pc_count > 10) {
+	/* Once we have run the callback 10 times, this will be the default option */
+	sensor_msgs::PointCloud2 output;
+	pcl::toROSMsg(ccloud, output);
+	output.header.stamp = ros::Time::now();
+	output.header.frame_id = "enu";
+	pub.publish(output);
+
+    } else {
+	ROS_INFO("Currently collecting point clouds");
+    }
+
+    /*
     sensor_msgs::PointCloud2 output;
     pcl::toROSMsg(*transformed_cloud, output);
     output.header.stamp = ros::Time::now();
     output.header.frame_id = "enu";
     pub.publish(output);
+    */
 }
 
 int main(int argc, char **argv) {
